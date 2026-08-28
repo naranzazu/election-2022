@@ -1,0 +1,100 @@
+---
+title: "2022 Florida Gubernatorial Election Results"
+format: html
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(tigris)
+library(sf)
+library(scales)
+library(leaflet)
+library(htmltools)
+
+# Cache shapefiles so downloads are fast
+options(tigris_use_cache = TRUE)
+```
+
+```{r}
+#| label: load-data
+# Load election results by county
+election_data <- read_csv("data/20221108__fl__general__county.csv", show_col_types = FALSE)
+
+# Filter for the Governor race and compute vote totals and margins per county
+gov_results <- election_data |> 
+  filter(office == "Governor", !candidate %in% c("OverVotes", "UnderVotes")) |> 
+  mutate(county = if_else(county == "Desoto", "DeSoto", county)) |> 
+  group_by(county) |> 
+  summarize(
+    total_votes = sum(votes),
+    dem_votes = sum(votes[party == "DEM"]),
+    rep_votes = sum(votes[party == "REP"]),
+    dem_pct = dem_votes / total_votes * 100,
+    rep_pct = rep_votes / total_votes * 100,
+    rep_margin = rep_pct - dem_pct,
+    winner = if_else(rep_votes > dem_votes, "Ron DeSantis (R)", "Charlie Crist (D)")
+  )
+
+# Get Florida county boundaries and transform to WGS84 for Leaflet
+fl_counties <- counties(state = "FL", cb = TRUE, progress_bar = FALSE) |> 
+  st_transform(4326)
+
+# Join spatial geometries with election data
+fl_map_data <- fl_counties |> 
+  left_join(gov_results, by = c("NAME" = "county"))
+```
+
+```{r}
+#| label: plot-interactive-map
+# Define symmetric color palette for Republican margin
+max_margin <- max(abs(fl_map_data$rep_margin), na.rm = TRUE)
+pal <- colorNumeric(
+  palette = c("#2166ac", "#f7f7f7", "#b2182b"),
+  domain = c(-max_margin, max_margin)
+)
+
+# Create hover labels with county details
+labels <- sprintf(
+  "<strong>%s County</strong><br/>
+   Winner: %s<br/>
+   DeSantis (R): %s (%.1f%%)<br/>
+   Crist (D): %s (%.1f%%)<br/>
+   Margin: %+.1f%%",
+  fl_map_data$NAME,
+  fl_map_data$winner,
+  comma(fl_map_data$rep_votes), fl_map_data$rep_pct,
+  comma(fl_map_data$dem_votes), fl_map_data$dem_pct,
+  fl_map_data$rep_margin
+) |> 
+  map(HTML)
+
+# Build interactive leaflet map
+leaflet(fl_map_data) |> 
+  addProviderTiles(providers$CartoDB.Positron) |> 
+  addPolygons(
+    fillColor = ~pal(rep_margin),
+    weight = 1,
+    opacity = 1,
+    color = "white",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 2,
+      color = "#444",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = labels
+  ) |> 
+  addLegend(
+    pal = pal,
+    values = ~rep_margin,
+    opacity = 0.7,
+    title = "DeSantis Margin (%)",
+    position = "bottomright"
+  )
+```
